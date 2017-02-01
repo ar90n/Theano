@@ -304,8 +304,8 @@ class GpuCrossentropySoftmax1HotWithBiasDx(GpuKernelBase, Op):
         return ['<numpy_compat.h>', '<gpuarray/types.h>']
 
     def c_code(self, node, nodename, inp, out, sub):
-        if node.inputs[0].type.context.kind != b'cuda':
-            raise NotImplementedError("cuda only")
+        #if node.inputs[0].type.context.kind != b'cuda':
+        #    raise NotImplementedError("cuda only")
         typecode_dx = pygpu.gpuarray.dtype_to_typecode(node.outputs[0].dtype)
         itemsize_dnll = numpy.dtype(node.inputs[0].dtype).itemsize
         itemsize_sm = numpy.dtype(node.inputs[1].dtype).itemsize
@@ -511,11 +511,9 @@ class GpuSoftmax(GpuKernelBase, Op):
         return (15,) + inline_softmax.code_version
 
     def c_headers(self):
-        return ['<numpy_compat.h>', '<gpuarray/types.h>']
+        return ['<numpy_compat.h>', '<gpuarray/types.h>', '<stdio.h>']
 
     def c_code(self, node, nodename, inp, out, sub):
-        if node.inputs[0].type.context.kind != b'cuda':
-            raise NotImplementedError("cuda only")
         dtype_x = node.inputs[0].dtype
         work_x = work_dtype(dtype_x)
         dtype_z = node.outputs[0].dtype
@@ -563,8 +561,9 @@ class GpuSoftmax(GpuKernelBase, Op):
         }
         {
             size_t n_blocks[3] = {std::min(PyGpuArray_DIMS(%(x)s)[0], (size_t)(32 * 1024)), 1, 1};
+            //size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)512), 1, 1};
+            size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)256), 1, 1};
 //TODO, detect the maximum number of thread per block.
-            size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)512), 1, 1};
             size_t shmem_sz = PyGpuArray_DIMS(%(x)s)[1] *
                                      2 * sizeof(npy_%(work_x)s);
             ssize_t stride_X0 = PyGpuArray_STRIDES(%(x)s)[0] / %(itemsize_x)s;
@@ -621,34 +620,35 @@ class GpuSoftmax(GpuKernelBase, Op):
             gpuarray.GpuArray, 'uintp', 'intp', 'intp',
             gpuarray.GpuArray, 'uintp', 'intp', 'intp'
             ]
+        print( type_sm );
         kernels = []
         kname = "kSoftmax"
         k_var = "kSoftmax_" + nodename
         code = nvcc_kernel(
             kname,
             params=['const ga_size M', 'const ga_size N',
-                    'const %s * x' % type_x, 'const ga_size offset_x',
+                    'const GLOBAL_MEM %s * x' % type_x, 'const ga_size offset_x',
                     'const ga_ssize sx0', 'const ga_ssize sx1',
-                    '%s * sm' % type_sm, 'const ga_size offset_sm',
-                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1'],
-            body=["extern __shared__ %s buf[]" % type_acc,
-                  "%s * buf2 = buf + N" % type_acc,
-                  "x = (const %s *)(((char *)x)+offset_x)" % type_x,
-                  "sm = (%s *)(((char *)sm)+offset_sm)" % type_sm,
-                  "for (int blockIDX = blockIdx.x; blockIDX < M;"
-                  "     blockIDX += gridDim.x){",
-                  "for (int tx = threadIdx.x; tx< N; tx += blockDim.x){",
+                    'GLOBAL_MEM %s * sm' % type_sm, 'const ga_size offset_sm',
+                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1 GA_DECL_SHARED_PARAM(%s,buf)' % type_acc],
+            body=["GA_DECL_SHARED_BODY(%s,buf)" % type_acc,
+                  "LOCAL_MEM %s * buf2 = buf + N" % type_acc,
+                  "x = (const GLOBAL_MEM %s *)(((char *)x)+offset_x)" % type_x,
+                  "sm = (GLOBAL_MEM %s *)(((char *)sm)+offset_sm)" % type_sm,
+                  "for (int blockIDX = GID_0; blockIDX < M;"
+                  "     blockIDX += GDIM_0){",
+                  "for (int tx = LID_0; tx< N; tx += LDIM_0){",
                   "buf[tx] = %s(x[blockIDX * sx0 + tx * sx1])" % load_x,
                   "buf2[tx] = buf[tx]",
                   "}",
-                  "__syncthreads()",
-                  inline_softmax('N', 'buf', 'buf2', 'threadIdx.x',
-                                 'blockDim.x', dtype=work_sm),
-                  "for (int tx = threadIdx.x; tx< N; tx += blockDim.x){",
+                  "local_barrier()",
+                  inline_softmax('N', 'buf', 'buf2', 'LID_0',
+                                 'LDIM_0', dtype=work_sm),
+                  "for (int tx = LID_0; tx< N; tx += LDIM_0){",
                   # This set all value correctly
-                  "sm[blockIDX * sm_s0 + tx * sm_s1] = %s(buf[tx])" % write_sm,
+                  "sm[blockIDX * sm_s0 + tx * sm_s1 ] = %s(buf[tx])" % write_sm,
                   "}",
-                  "__syncthreads()",
+                  "local_barrier()",
                   "}",
                   ])
         kernels.append(Kernel(code=code, name=kname, params=params,
@@ -658,23 +658,23 @@ class GpuSoftmax(GpuKernelBase, Op):
         code = nvcc_kernel(
             kname,
             params=['const ga_size M', 'const ga_size N',
-                    'const %s * x' % type_x, 'const ga_size offset_x',
+                    'const GLOBAL_MEM %s * x' % type_x, 'const ga_size offset_x',
                     'const ga_ssize sx0', 'const ga_ssize sx1',
-                    '%s * sm' % type_sm, 'const ga_size offset_sm',
-                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1'],
-            body=["extern __shared__ %s buf[]" % type_acc,
-                  "x = (const %s *)(((char *)x)+offset_x)" % type_x,
-                  "sm = (%s *)(((char *)sm)+offset_sm)" % type_sm,
-                  "for (int blockIDX = blockIdx.x; blockIDX < M;"
-                  "     blockIDX += gridDim.x){",
-                  "const %s *x_ptr = &x[blockIDX * sx0]" % type_x,
-                  "%s *sm_ptr = &sm[blockIDX * sm_s0]" % type_sm,
+                    'GLOBAL_MEM %s * sm' % type_sm, 'const ga_size offset_sm',
+                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1 GA_DECL_SHARED_PARAM(%s, buf)' % type_acc],
+            body=["GA_DECL_SHARED_BODY(%s, buf)" % type_acc,
+                  "x = (const GLOBAL_MEM %s *)(((char *)x)+offset_x)" % type_x,
+                  "sm = (GLOBAL_MEM %s *)(((char *)sm)+offset_sm)" % type_sm,
+                  "for (int blockIDX = GID_0; blockIDX < M;"
+                  "     blockIDX += GDIM_0){",
+                  "const GLOBAL_MEM %s *x_ptr = &x[blockIDX * sx0]" % type_x,
+                  "GLOBAL_MEM %s *sm_ptr = &sm[blockIDX * sm_s0]" % type_sm,
                   inline_softmax_fixed_shared('N', 'buf', 'x_ptr', 'sx1',
                                               load_x,
                                               'sm_ptr', 'sm_s1', write_sm,
-                                              'threadIdx.x', 'blockDim.x',
+                                              'LID_0', 'LDIM_0',
                                               dtype=work_sm),
-                  "__syncthreads()",
+                  "local_barrier()",
                   "}",
                   ])
         kernels.append(Kernel(code=code, name=kname, params=params,
@@ -710,11 +710,11 @@ class GpuSoftmaxWithBias(GpuKernelBase, Op):
         return (14,) + inline_softmax.code_version
 
     def c_headers(self):
-        return ['<numpy_compat.h>', '<gpuarray/types.h>']
+        return ['<numpy_compat.h>', '<gpuarray/types.h>', '<stdio.h>']
 
     def c_code(self, node, nodename, inp, out, sub):
-        if node.inputs[0].type.context.kind != b'cuda':
-            raise NotImplementedError('cuda only')
+        #if node.inputs[0].type.context.kind != b'cuda':
+        #    raise NotImplementedError('cuda only')
         dtype_x = node.inputs[0].dtype
         dtype_b = node.inputs[1].dtype
         dtype_z = node.outputs[0].dtype
@@ -776,9 +776,11 @@ class GpuSoftmaxWithBias(GpuKernelBase, Op):
             }
         }
         {
-            size_t n_blocks[3] = {std::min(PyGpuArray_DIMS(%(x)s)[0], (size_t)(32*1024)), 1, 1};
+            //size_t n_blocks[3] = {std::min(PyGpuArray_DIMS(%(x)s)[0], (size_t)(32*1024)), 1, 1};
 //TODO, detect the maximum number of thread per block.
-            size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)512), 1, 1};
+            //size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)512), 1, 1};
+            size_t threads_per_block[3] = {std::min(PyGpuArray_DIMS(%(x)s)[1], (size_t)256), 1, 1};
+            size_t n_blocks[3] = {std::min((PyGpuArray_DIMS(%(x)s)[1] * PyGpuArray_DIMS(%(x)s)[0] + threads_per_block[0] -1 ) / threads_per_block[0], (size_t)(32 * 1024)), 1, 1};
             size_t shmem_sz = PyGpuArray_DIMS(%(x)s)[1] *
                                      2 * sizeof(npy_%(work_x)s);
             ssize_t stride_X0 = PyGpuArray_STRIDES(%(x)s)[0] / %(itemsize_x)s;
@@ -845,31 +847,32 @@ class GpuSoftmaxWithBias(GpuKernelBase, Op):
         code = nvcc_kernel(
             kname,
             params=['const ga_size M', 'const ga_size N',
-                    'const %s * x' % type_x, 'const ga_size offset_x',
+                    'const GLOBAL_MEM %s * x' % type_x, 'const ga_size offset_x',
                     'const ga_ssize sx0', 'const ga_ssize sx1',
-                    'const %s * b' % type_b, 'const ga_size offset_b',
+                    'const GLOBAL_MEM %s * b' % type_b, 'const ga_size offset_b',
                     'const ga_ssize sb0',
-                    '%s * sm' % type_sm, 'const ga_size offset_sm',
-                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1'],
-            body=["extern __shared__ %s buf[]" % type_acc,
-                  "%s * buf2 = buf + N" % type_acc,
-                  "x = (const %s *)(((char *)x)+offset_x)" % type_x,
-                  "b = (const %s *)(((char *)b)+offset_b)" % type_b,
-                  "sm = (%s *)(((char *)sm)+offset_sm)" % type_sm,
-                  "for (int blockIDX = blockIdx.x; blockIDX < M;"
-                  "     blockIDX += gridDim.x){",
-                  "for (int tx = threadIdx.x; tx< N; tx += blockDim.x){",
+                    'GLOBAL_MEM %s * sm' % type_sm, 'const ga_size offset_sm',
+                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1 GA_DECL_SHARED_PARAM(%s, buf)' % type_acc],
+            body=["GA_DECL_SHARED_BODY(%s,buf)" % type_acc,
+                  "LOCAL_MEM %s * buf2 = buf + N" % type_acc,
+                  "x = (const GLOBAL_MEM %s *)(((char *)x)+offset_x)" % type_x,
+                  "b = (const GLOBAL_MEM %s *)(((char *)b)+offset_b)" % type_b,
+                  "sm = (GLOBAL_MEM %s *)(((char *)sm)+offset_sm)" % type_sm,
+                  "for (int blockIDX = GID_0; blockIDX < M;"
+                  "     blockIDX += GDIM_0){",
+                  "for (int tx = LID_0; tx< N; tx += LDIM_0){",
                   "buf[tx] = %s(x[blockIDX * sx0 + tx * sx1])" % load_x,
                   "buf[tx] += %s(b[tx * sb0])" % load_b,
                   "buf2[tx] = buf[tx]",
                   "}",
-                  "__syncthreads()",
+                  "local_barrier()",
                   inline_softmax('N', 'buf', 'buf2',
-                                 'threadIdx.x', 'blockDim.x', work_sm),
-                  "for (int tx = threadIdx.x; tx< N; tx += blockDim.x){",
-                  "sm[blockIDX * sm_s0 + tx * sm_s1] = %s(buf[tx])" % write_sm,
+                                 'LID_0', 'LDIM_0', work_sm),
+                  "for (int tx = LID_0; tx< N; tx += LDIM_0){",
+                  #"sm[blockIDX * sm_s0 + tx * sm_s1] = %s(buf[tx])" % write_sm,
+                  "sm[blockIDX * N + tx] = %s(buf[tx])" % write_sm,
                   "}",
-                  "__syncthreads()",
+                  "local_barrier()",
                   "}",
                   ])
         kernels.append(Kernel(code=code, name=kname, params=params,
@@ -879,26 +882,26 @@ class GpuSoftmaxWithBias(GpuKernelBase, Op):
         code = nvcc_kernel(
             kname,
             params=['const ga_size M', 'const ga_size N',
-                    'const %s * x' % type_x, 'const ga_size offset_x',
+                    'const GLOBAL_MEM %s * x' % type_x, 'const ga_size offset_x',
                     'const ga_ssize sx0', 'const ga_ssize sx1',
-                    'const %s * b' % type_b, 'const ga_size offset_b',
+                    'const GLOBAL_MEM %s * b' % type_b, 'const ga_size offset_b',
                     'const ga_ssize sb0',
-                    '%s * sm' % type_sm, 'const ga_size offset_sm',
-                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1'],
-            body=["extern __shared__ %s buf[]" % type_acc,
-                  "x = (const %s *)(((char *)x)+offset_x)" % type_x,
-                  "b = (const %s *)(((char *)b)+offset_b)" % type_b,
-                  "sm = (%s *)(((char *)sm)+offset_sm)" % type_sm,
-                  "for (int blockIDX = blockIdx.x; blockIDX < M;"
-                  "     blockIDX += gridDim.x){",
-                  "const %s *x_ptr = &x[blockIDX * sx0]" % type_x,
-                  "%s *sm_ptr = &sm[blockIDX * sm_s0]" % type_sm,
+                    'GLOBAL_MEM %s * sm' % type_sm, 'const ga_size offset_sm',
+                    'const ga_ssize sm_s0', 'const ga_ssize sm_s1 GA_DECL_SHARED_PARAM(%s, buf)' % type_acc],
+            body=["GA_DECL_SHARED_BODY(%s, buf)" % type_acc,
+                  "x = (const GLBOAL_MEM %s *)(((char *)x)+offset_x)" % type_x,
+                  "b = (const GLBOAL_MEM %s *)(((char *)b)+offset_b)" % type_b,
+                  "sm = (GLOBAL_MEM %s *)(((char *)sm)+offset_sm)" % type_sm,
+                  "for (int blockIDX = GID_0; blockIDX < M;"
+                  "     blockIDX += GDIM_0){",
+                  "const GLOBAL_MEM %s *x_ptr = &x[blockIDX * sx0]" % type_x,
+                  "GLOBAL_MEM %s *sm_ptr = &sm[blockIDX * sm_s0]" % type_sm,
                   inline_softmax_fixed_shared('N', 'buf', 'x_ptr', 'sx1',
                                               load_x,
                                               'sm_ptr', 'sm_s1', write_sm,
-                                              'threadIdx.x', 'blockDim.x',
+                                              'LID_0', 'LDIM_0',
                                               'b', 'sb0', load_b, work_sm),
-                  "__syncthreads()",
+                  "local_barrier()",
                   "}",
                   ])
         kernels.append(Kernel(code=code, name=kname, params=params,

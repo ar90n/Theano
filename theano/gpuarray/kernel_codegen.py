@@ -100,9 +100,10 @@ def inline_reduce(N, buf, pos, count, manner_fn):
         // This function trashes buf[1..warpSize],
         // leaving the reduction result in buf[0].
 
-        if (%(pos)s < warpSize)
+        if (%(pos)s < GA_WARP_SIZE)
+        if (false)
         {
-            for (int i = %(pos)s + warpSize; i < %(N)s; i += warpSize)
+            for (int i = %(pos)s + GA_WARP_SIZE; i < %(N)s; i += GA_WARP_SIZE)
             {
                 %(buf)s[%(pos)s] = %(loop_line)s;
             }
@@ -119,6 +120,12 @@ def inline_reduce(N, buf, pos, count, manner_fn):
                     %(buf)s[%(pos)s] = %(r_2)s;
                 if(%(pos)s + 1 < %(N)s)
                     %(buf)s[%(pos)s] = %(r_1)s;
+            }
+        }
+        else if (%(pos)s == 0 ) {
+            for (int i = %(pos)s + 1; i < %(N)s; i += 1)
+            {
+                %(buf)s[%(pos)s] = %(loop_line)s;
             }
         }
     }
@@ -183,25 +190,25 @@ def inline_softmax(N, buf, buf2, threadPos, threadCount, dtype="float32"):
     ctype = gpuarray.dtype_to_ctype(dtype)
     # get max of buf (trashing all but buf[0])
     return [inline_reduce_max(N, buf, threadPos, threadCount),
-            '__syncthreads()',
+            'local_barrier()',
             ('%s row_max = ' + buf + '[0]') % ctype,
-            '__syncthreads()',
+            'local_barrier()',
             'for(int __i=' + threadPos + '; __i<' + N +
             '; __i+=' + threadCount + '){',
             buf + '[__i] = exp(' + buf2 + '[__i] - row_max)',
             buf2 + '[__i] = ' + buf + '[__i]',
             '}',
-            '__syncthreads()',
+            'local_barrier()',
             inline_reduce_sum(N, buf, threadPos, threadCount),
-            '__syncthreads()',
+            'local_barrier()',
             ('%s row_sum = ' + buf + '[0]') % ctype,
-            '__syncthreads()',
+            'local_barrier()',
             # divide each exp() result by the sum to complete the job.
             'for(int __i=' + threadPos + '; __i<' + N +
             '; __i+=' + threadCount + '){',
             buf + '[__i] = ' + buf2 + '[__i] / row_sum',
             '}',
-            '__syncthreads()',
+            'local_barrier()',
             ]
 
 
@@ -285,10 +292,11 @@ def inline_reduce_fixed_shared(N, buf, x, stride_x, load_x, pos, count,
           red = %(loop_line)s;
         }
         buf[%(pos)s] = red;
-        __syncthreads();
-        if (%(pos)s < warpSize)
+        local_barrier();
+        //if (%(pos)s < GA_WARP_SIZE)
+        if (false)
         {
-            for (int i = %(pos)s + warpSize; i < %(count)s; i += warpSize)
+            for (int i = %(pos)s + GA_WARP_SIZE; i < %(count)s; i += GA_WARP_SIZE)
             {
                 %(buf)s[%(pos)s] = %(loop_line2)s;
             }
@@ -305,6 +313,13 @@ def inline_reduce_fixed_shared(N, buf, x, stride_x, load_x, pos, count,
                     %(buf)s[%(pos)s] = %(r_2)s;
                 if(%(pos)s + 1 < %(N)s)
                     %(buf)s[%(pos)s] = %(r_1)s;
+            }
+        }
+        else if( %(pos)s == 0 )
+        {
+            for (int i = %(pos)s + 1; i < %(N)s; i += 1)
+            {
+                %(buf)s[%(pos)s] = %(loop_line2)s;
             }
         }
     }
@@ -382,18 +397,18 @@ def inline_softmax_fixed_shared(N, buf, x, stride_x, load_x,
                                        threadPos, threadCount,
                                        b, stride_b, load_b,
                                        dtype),
-        '__syncthreads()',
+        'local_barrier()',
         ('%s row_max = ' + buf + '[0]') % ctype,
-        '__syncthreads()',
+        'local_barrier()',
         inline_reduce_fixed_shared(N, buf, x, stride_x, load_x,
                                    threadPos, threadCount,
                                    lambda a, b: "%s + %s" % (a, b),
                                    lambda a: "exp(%s - row_max)" % a,
                                    b, stride_b, load_b, dtype),
-        '__syncthreads()',
+        'local_barrier()',
         ('%s row_sum = ' + buf + '[0]') % ctype,
-        '__syncthreads()',
-        "for (int tx = threadIdx.x; tx< N; tx += blockDim.x){",
+        'local_barrier()',
+        "for (int tx = LID_0; tx< N; tx += LDIM_0){",
         ]
     # This set all value correctly
     if b:
@@ -409,6 +424,6 @@ def inline_softmax_fixed_shared(N, buf, x, stride_x, load_x,
             " / row_sum)" % locals()]
     ret += [
         "}",
-        '__syncthreads()',
+        'local_barrier()',
     ]
     return ret
