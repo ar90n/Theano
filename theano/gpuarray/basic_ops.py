@@ -1432,7 +1432,7 @@ class GpuEye(GpuKernelBase, Op):
 KERNEL void eye(GLOBAL_MEM %(ctype)s *a, ga_size n, ga_size m) {
     ga_size nb = n < m ? n : m;
     for (ga_size i = LID_0; i < nb; i += LDIM_0) {
-        a[i*m + i] = %(write_a)s(1);
+        %(write_a)s(a + (i*m + i), 1);
     }
 }""" % dict(ctype=pygpu.gpuarray.dtype_to_ctype(self.dtype),
             name=name, write_a=write_w(self.dtype))

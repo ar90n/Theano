@@ -213,7 +213,7 @@ def op_lifter(OP, cuda_only=False):
                 # Check if we should replace
                 if (not replace or
                         (cuda_only and
-                         get_context(context_name).kind != b'cuda') or
+                         get_context(context_name).kind not in [b'cuda', b'opencl'] ) or
                         any(["complex" in i.dtype for i in node.inputs])):
                     return False
 

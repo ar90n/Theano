@@ -937,11 +937,11 @@ class GPUA_mrg_uniform(GpuKernelBase, mrg_uniform_base):
                 x21 = y2;
 
                 if (x11 <= x21) {
-                    sample_data[i] = %(write)s(((x11 - x21 + M1) %(mask)s) * %(NORM)s);
+                    %(write)s(sample_data[i], (((x11 - x21 + M1) %(mask)s) * %(NORM)s));
                 }
                 else
                 {
-                    sample_data[i] = %(write)s(((x11 - x21) %(mask)s) * %(NORM)s);
+                    %(write)s(sample_data[i],( ((x11 - x21) %(mask)s) * %(NORM)s));
                 }
             }
 

@@ -89,6 +89,8 @@ def inline_reduce(N, buf, pos, count, manner_fn):
 
     """
     loop_line = manner_fn("%s[%s]" % (buf, pos), "%s[i]" % (buf))
+    loop_line2 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+offset]" % (buf,pos))
+    r_32 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+32]" % (buf, pos))
     r_16 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+16]" % (buf, pos))
     r_8 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+8]" % (buf, pos))
     r_4 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+4]" % (buf, pos))
@@ -101,32 +103,35 @@ def inline_reduce(N, buf, pos, count, manner_fn):
         // leaving the reduction result in buf[0].
 
         if (%(pos)s < GA_WARP_SIZE)
-        if (false)
         {
             for (int i = %(pos)s + GA_WARP_SIZE; i < %(N)s; i += GA_WARP_SIZE)
             {
                 %(buf)s[%(pos)s] = %(loop_line)s;
             }
-            if (%(pos)s < 16)
+
+#if 1
+            //reduce so that %(pos)s 0 has the sum of everything
+            if((%(pos)s + 32 < %(N)s) && (64 <= GA_WARP_SIZE))
+                %(buf)s[%(pos)s] = %(r_32)s;
+            if(%(pos)s + 16 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_16)s;
+            if(%(pos)s + 8 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_8)s;
+            if(%(pos)s + 4 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_4)s;
+            if(%(pos)s + 2 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_2)s;
+            if(%(pos)s + 1 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_1)s;
+#else
+            unsigned int offset = GA_WARP_SIZE / 2;
+            while( 0 < offset )
             {
-                //reduce so that %(pos)s 0 has the sum of everything
-                if(%(pos)s + 16 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_16)s;
-                if(%(pos)s + 8 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_8)s;
-                if(%(pos)s + 4 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_4)s;
-                if(%(pos)s + 2 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_2)s;
-                if(%(pos)s + 1 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_1)s;
+                if(%(pos)s + offset < %(N)s)
+                    %(buf)s[%(pos)s] = %(loop_line2)s;
+                offset = offset / 2;
             }
-        }
-        else if (%(pos)s == 0 ) {
-            for (int i = %(pos)s + 1; i < %(N)s; i += 1)
-            {
-                %(buf)s[%(pos)s] = %(loop_line)s;
-            }
+#endif
         }
     }
     """ % locals()
@@ -262,26 +267,31 @@ def inline_reduce_fixed_shared(N, buf, x, stride_x, load_x, pos, count,
     `buf` should be in gpu shared memory, we access it many times.
 
     """
+
+    ctype = gpuarray.dtype_to_ctype(dtype)
+
     if b:
-        init = manner_init("%(load_x)s(%(x)s[%(pos)s * %(stride_x)s]) +"
-                           " %(load_b)s(%(b)s[%(pos)s * %(stride_b)s])" % locals())
+        init = manner_init("%(load_x)s(%(x)s + (%(pos)s * %(stride_x)s)) +"
+                           " %(load_b)s(%(b)s + (%(pos)s * %(stride_b)s))" % locals())
         loop_line = manner_fn("red",
-                              manner_init("%(load_x)s(%(x)s[i * %(stride_x)s]) + "
-                                          "%(load_b)s(%(b)s[i * %(stride_b)s])" %
+                              manner_init("%(ctype)s(%(load_x)s(%(x)s + (i * %(stride_x)s)) + "
+                                          "%(load_b)s(%(b)s + (i * %(stride_b)s)))" %
                                           locals()))
     else:
-        init = manner_init("%(load_x)s(%(x)s[%(pos)s * %(stride_x)s])" % locals())
-        loop_line = manner_fn("red", manner_init("%(load_x)s(%(x)s[i * %(stride_x)s])" %
+        init = manner_init("%(load_x)s(%(x)s + (%(pos)s * %(stride_x)s))" % locals())
+        loop_line = manner_fn("red", manner_init("%(ctype)s(%(load_x)s(%(x)s + (i * %(stride_x)s)))" %
                                                  locals()))
     loop_line2 = manner_fn("%s[%s]" % (buf, pos),
                            "%s[i]" % buf)
+    loop_line3 = manner_fn("%s[%s]" % (buf, pos),
+                           "%s[%s+offset]" % (buf,pos))
+    r_32 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+32]" % (buf, pos))
     r_16 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+16]" % (buf, pos))
     r_8 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+8]" % (buf, pos))
     r_4 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+4]" % (buf, pos))
     r_2 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+2]" % (buf, pos))
     r_1 = manner_fn("%s[%s]" % (buf, pos), "%s[%s+1]" % (buf, pos))
 
-    ctype = gpuarray.dtype_to_ctype(dtype)
     return """
     {
         // This function trashes buf[1..n_threads],
@@ -293,35 +303,39 @@ def inline_reduce_fixed_shared(N, buf, x, stride_x, load_x, pos, count,
         }
         buf[%(pos)s] = red;
         local_barrier();
-        //if (%(pos)s < GA_WARP_SIZE)
-        if (false)
+
+        if (%(pos)s < GA_WARP_SIZE)
         {
             for (int i = %(pos)s + GA_WARP_SIZE; i < %(count)s; i += GA_WARP_SIZE)
             {
                 %(buf)s[%(pos)s] = %(loop_line2)s;
             }
-            if (%(pos)s < 16)
+
+#if 1
+            //reduce so that %(pos)s 0 has the sum of everything
+            if((%(pos)s + 32 < %(N)s) && (64 <= GA_WARP_SIZE))
+                %(buf)s[%(pos)s] = %(r_32)s;
+            if(%(pos)s + 16 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_16)s;
+            if(%(pos)s + 8 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_8)s;
+            if(%(pos)s + 4 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_4)s;
+            if(%(pos)s + 2 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_2)s;
+            if(%(pos)s + 1 < %(N)s)
+                %(buf)s[%(pos)s] = %(r_1)s;
+#else
+            unsigned int offset = GA_WARP_SIZE / 2;
+            while( 0 < offset )
             {
-                //reduce so that %(pos)s 0 has the reduction of everything
-                if(%(pos)s + 16 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_16)s;
-                if(%(pos)s + 8 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_8)s;
-                if(%(pos)s + 4 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_4)s;
-                if(%(pos)s + 2 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_2)s;
-                if(%(pos)s + 1 < %(N)s)
-                    %(buf)s[%(pos)s] = %(r_1)s;
+                if(%(pos)s + offset < %(N)s)
+                    %(buf)s[%(pos)s] = %(loop_line3)s;
+                offset = offset / 2;
             }
+#endif
         }
-        else if( %(pos)s == 0 )
-        {
-            for (int i = %(pos)s + 1; i < %(N)s; i += 1)
-            {
-                %(buf)s[%(pos)s] = %(loop_line2)s;
-            }
-        }
+
     }
     """ % locals()
 
@@ -369,7 +383,7 @@ def inline_softmax_fixed_shared(N, buf, x, stride_x, load_x,
     sm_stride
         The stride between each sm element.
     write_sm
-        Wrapper before writing to sm.
+        A function for writing to sm.
     threadPos
         Index of executing thread.
     threadCount
@@ -413,15 +427,13 @@ def inline_softmax_fixed_shared(N, buf, x, stride_x, load_x,
     # This set all value correctly
     if b:
         ret += [
-            "%(sm)s[tx * %(sm_stride)s] = "
-            "  %(write_sm)s(exp(%(load_x)s(%(x)s[tx * %(stride_x)s]) +"
-            "            %(load_b)s(%(b)s[tx * %(stride_b)s]) - row_max)"
-            " / row_sum)" % locals()]
+            "  %(write_sm)s(%(sm)s + (tx * %(sm_stride)s), ( exp(%(load_x)s(%(x)s + (tx * %(stride_x)s)) +"
+            "            %(load_b)s(%(b)s + (tx * %(stride_b)s)) - row_max)"
+            " / row_sum))" % locals()]
     else:
         ret += [
-            "%(sm)s[tx * %(sm_stride)s] = "
-            "%(write_sm)s(exp(%(load_x)s(%(x)s[tx * %(stride_x)s]) - row_max)"
-            " / row_sum)" % locals()]
+            "%(write_sm)s(%(sm)s + (tx * %(sm_stride)s), (exp(%(load_x)s(%(x)s + (tx * %(stride_x)s)) - row_max)"
+            " / row_sum))" % locals()]
     ret += [
         "}",
         'local_barrier()',

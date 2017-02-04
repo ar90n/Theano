@@ -10,13 +10,13 @@ def work_dtype(dtype):
 
 def load_w(dtype):
     if dtype == 'float16':
-        return '__half2float'
+        return 'load_half'
     else:
-        return ''
+        return '*'
 
 
 def write_w(dtype):
     if dtype == 'float16':
-        return '__float2half_rn'
+        return 'store_half'
     else:
-        return ''
+        return 'store'
