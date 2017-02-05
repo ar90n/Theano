@@ -70,15 +70,15 @@ class GpuCumOp(GpuKernelBase, Op):
         dtype_x = node.inputs[0].dtype
         flags = Kernel.get_flags(dtype_x)
         code = """
-        KERNEL void %(kname)s(float* input, float* output,
+        KERNEL void %(kname)s(GLOBAL_MEM float* input, GLOBAL_MEM float* output,
                               ga_ssize inputStrides_x,
                               ga_ssize inputStrides_y,
                               ga_ssize inputStrides_z,
                               ga_ssize outputStrides_x, ga_ssize outputStrides_y,
                               ga_ssize outputStrides_z, const int offsetY, const int offsetZ,
                               const int beforeLastElementIdx, const int lastElementIdx){
-            int idY = blockIdx.y + offsetY;
-            int idZ = blockIdx.z + offsetZ;
+            int idY = GID_1 + offsetY;
+            int idZ = GID_2 + offsetZ;
 
             int dataOffsetY_input = idY * inputStrides_y + idZ * inputStrides_z;
             int dataOffsetY_output = idY * outputStrides_y + idZ * outputStrides_z;
@@ -106,74 +106,75 @@ class GpuCumOp(GpuKernelBase, Op):
         code = """
         // helper functions
         WITHIN_KERNEL
-        void k_reductionPhase(float* partialCumOp) {
+        void k_reductionPhase(LOCAL_MEM_ARG float* partialCumOp) {
             // Traverse down from leaves to root building partial sums at internal nodes in the tree.
-            for (unsigned int stride = 1; stride <= blockDim.x; stride *= 2) {
+            for (unsigned int stride = 1; stride <= LDIM_0; stride *= 2) {
                 local_barrier();
-                unsigned int index = (threadIdx.x + 1) * (stride * 2) - 1;
-                if(index < blockDim.x*2) {
+                unsigned int index = (LID_0 + 1) * (stride * 2) - 1;
+                if(index < LDIM_0*2) {
                     partialCumOp[index] %(op)s= partialCumOp[index - stride];
                 }
             }
         }
 
         WITHIN_KERNEL
-        void k_fetchData(float* partialCumOp, float* input, int globalThreadID,
+        void k_fetchData(LOCAL_MEM_ARG float* partialCumOp, GLOBAL_MEM float* input, int globalThreadID,
                          ga_ssize dataStrides_x, ga_ssize dataStrides_y, ga_ssize dataStrides_z,
                          int offsetY, int offsetZ) {
-            // blockIdx.y and blockIdx.z represents the current independent cum op
-            int idY = blockIdx.y + offsetY;
-            int idZ = blockIdx.z + offsetZ; int offset = idY * dataStrides_y + idZ * dataStrides_z;
+            // GID_1 and GID_2 represents the current independent cum op
+            int idY = GID_1 + offsetY;
+            int idZ = GID_2 + offsetZ; int offset = idY * dataStrides_y + idZ * dataStrides_z;
             int idx_even = (globalThreadID*2    ) * dataStrides_x + offset;
             int idx_odd  = (globalThreadID*2 + 1) * dataStrides_x + offset;
-            partialCumOp[threadIdx.x*2]     = input[idx_even];
-            partialCumOp[threadIdx.x*2 + 1] = input[idx_odd];
+            partialCumOp[LID_0*2]     = input[idx_even];
+            partialCumOp[LID_0*2 + 1] = input[idx_odd];
         }
 
         WITHIN_KERNEL
-        void k_reversePhase(float* partialCumOp) {
+        void k_reversePhase(LOCAL_MEM_ARG float* partialCumOp) {
             // Traverse back up the tree building the scan from the partial sums
-            for (unsigned int stride = exp2(ceil(log2((float)blockDim.x))); stride > 0; stride /= 2) {
+            for (unsigned int stride = exp2(ceil(log2((float)LDIM_0))); stride > 0; stride /= 2) {
                 local_barrier();
-                unsigned int index = (threadIdx.x + 1) * (stride * 2) - 1;
-                if(index + stride < blockDim.x*2) {
+                unsigned int index = (LID_0 + 1) * (stride * 2) - 1;
+                if(index + stride < LDIM_0*2) {
                     partialCumOp[index + stride] %(op)s= partialCumOp[index];
                 }
             }
         }
 
         WITHIN_KERNEL
-        void k_pushData(float* partialCumOp, float* output, int globalThreadID,
+        void k_pushData(LOCAL_MEM_ARG float* partialCumOp, GLOBAL_MEM float* output, int globalThreadID,
                         ga_ssize dataStrides_x, ga_ssize dataStrides_y, ga_ssize dataStrides_z,
                         int offsetY, int offsetZ) {
             local_barrier();
-            // blockIdx.y and blockIdx.z represents the current independent cum op
-            int idY = blockIdx.y + offsetY;
-            int idZ = blockIdx.z + offsetZ;
+            // GID_1 and GID_2 represents the current independent cum op
+            int idY = GID_1 + offsetY;
+            int idZ = GID_2 + offsetZ;
             int offset = idY * dataStrides_y + idZ * dataStrides_z;
             int idx_even = (globalThreadID*2    ) * dataStrides_x + offset;
             int idx_odd  = (globalThreadID*2 + 1) * dataStrides_x + offset;
-            output[idx_even] = partialCumOp[threadIdx.x*2];
-            output[idx_odd]  = partialCumOp[threadIdx.x*2 + 1];
+            output[idx_even] = partialCumOp[LID_0*2];
+            output[idx_odd]  = partialCumOp[LID_0*2 + 1];
         }
 
-        KERNEL void k_blockCumOp(float* input, float* output,
+        KERNEL void k_blockCumOp(GLOBAL_MEM float* input, GLOBAL_MEM float* output,
                                         size_t nbElementsPerCumOp, ga_ssize inputStrides_x,
                                         ga_ssize inputStrides_y,  ga_ssize inputStrides_z,
                                         ga_ssize outputStrides_x, ga_ssize outputStrides_y,
                                         ga_ssize outputStrides_z, int offsetY,
-                                        int offsetZ, float* blockSum) {
-            // Regarding blockIdx and threadIdx, 'CumOp' is always performed along the X axis.
+                                        int offsetZ, GLOBAL_MEM float* blockSum
+                                        GA_DECL_SHARED_PARAM(float, partialCumOp)) {
+            // Regarding GID and LID, 'CumOp' is always performed along the X axis.
             // The Y and Z axis of the grid will contain all independent cumops of the 2D/3D case.
 
-            int globalThreadID = blockIdx.x * blockDim.x + threadIdx.x;
+            int globalThreadID = GID_0 * LDIM_0 + LID_0;
 
             // Check if current thread has data to process.
             if (globalThreadID >= (nbElementsPerCumOp+1)/2) {
                 return;
             }
 
-            extern __shared__ float partialCumOp[];
+            GA_DECL_SHARED_BODY(float, partialCumOp);
 
             // Load data in shared memory
             k_fetchData(partialCumOp, input, globalThreadID, inputStrides_x, inputStrides_y, inputStrides_z, offsetY, offsetZ);
@@ -188,8 +189,8 @@ class GpuCumOp(GpuKernelBase, Op):
             k_pushData(partialCumOp, output, globalThreadID, outputStrides_x, outputStrides_y, outputStrides_z, offsetY, offsetZ);
 
             if (blockSum != NULL){
-                if (threadIdx.x == blockDim.x - 1) {
-                    blockSum[blockIdx.x*(gridDim.y*gridDim.z) + (blockIdx.y + offsetY)*gridDim.z + blockIdx.z + offsetZ] = partialCumOp[threadIdx.x*2 + 1];
+                if (LID_0 == LDIM_0 - 1) {
+                    blockSum[GID_0*(GDIM_1*GDIM_2) + (GID_1 + offsetY)*GDIM_2 + GID_2 + offsetZ] = partialCumOp[LID_0*2 + 1];
                 }
             }
         }
@@ -200,19 +201,19 @@ class GpuCumOp(GpuKernelBase, Op):
         kname = "k_finalCumOp"
         k_var = "k_finalCumOp_" + nodename
         code = """
-        KERNEL void k_finalCumOp(float* output, float* blockSum, size_t nbElementsPerCumOp,
+        KERNEL void k_finalCumOp(GLOBAL_MEM float* output, GLOBAL_MEM float* blockSum, size_t nbElementsPerCumOp,
                                                ga_ssize dataStrides_x,  ga_ssize dataStrides_y,  ga_ssize dataStrides_z,
                                                int offsetY, int offsetZ) {
-            int globalThreadID = (blockIdx.x + 1) * blockDim.x + threadIdx.x;
+            int globalThreadID = (GID_0 + 1) * LDIM_0 + LID_0;
 
             // Check if current has data to process.
             if (globalThreadID >= (nbElementsPerCumOp+1)/2)
                 return;
 
-            int idY = blockIdx.y + offsetY;
-            int idZ = blockIdx.z + offsetZ;
+            int idY = GID_1 + offsetY;
+            int idZ = GID_2 + offsetZ;
 
-            const float currentBlockSum = blockSum[blockIdx.x*(gridDim.y*gridDim.z) + idY*gridDim.z + idZ];
+            const float currentBlockSum = blockSum[GID_0*(GDIM_1*GDIM_2) + idY*GDIM_2 + idZ];
 
             int offset = idY * dataStrides_y + idZ * dataStrides_z;
             int idx_even = (globalThreadID*2    ) * dataStrides_x + offset;
@@ -229,8 +230,6 @@ class GpuCumOp(GpuKernelBase, Op):
         return kernels
 
     def c_code(self, node, nodename, inp, out, sub):
-        if node.inputs[0].type.context.kind != b'cuda':
-            raise NotImplementedError("cuda only")
         x, = inp
         z, = out
         axis = self.axis if self.axis is not None else 0
@@ -421,7 +420,8 @@ class GpuCumOp(GpuKernelBase, Op):
                                                  (void*) &offsetY,
                                                  (void*) &offsetZ
                             };
-                        int err = GpuKernel_call(&k_finalCumOp_%(nodename)s, 3, dimGrid, dimBlock, sharedBytes, kernel_params);
+                        //int err = GpuKernel_call(&k_finalCumOp_%(nodename)s, 3, dimGrid, dimBlock, sharedBytes, kernel_params);
+                        int err = GpuKernel_call(&k_finalCumOp_%(nodename)s, 3, dimGrid, dimBlock, 0, kernel_params);
                         if (err != GA_NO_ERROR){
                             PyErr_SetString(PyExc_RuntimeError, "finalCumOp call failed");
                             return -1;
@@ -446,7 +446,8 @@ class GpuCumOp(GpuKernelBase, Op):
                                                  (void*) &(tmp0),
                                                  (void*) &(tmp1)
                         };
-                        int err = GpuKernel_call(&k_cumadd_%(nodename)s, 3, dimGrid, dimBlock, sharedBytes, kernel_params);
+                        //int err = GpuKernel_call(&k_cumadd_%(nodename)s, 3, dimGrid, dimBlock, sharedBytes, kernel_params);
+                        int err = GpuKernel_call(&k_cumadd_%(nodename)s, 3, dimGrid, dimBlock, 0, kernel_params);
                         if (err != GA_NO_ERROR){
                             PyErr_SetString(PyExc_RuntimeError, "cumadd call failed");
                             return -1;
