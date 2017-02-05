@@ -26,8 +26,8 @@ class TestGpuCumOp(theano.tensor.tests.test_extra_ops.TestCumOp):
     def setUp(self):
         super(TestGpuCumOp, self).setUp()
         test_ctx = get_context(test_ctx_name)
-        if test_ctx.kind != b'cuda':
-            raise SkipTest("Cuda specific tests")
+        #if test_ctx.kind != b'cuda':
+        #    raise SkipTest("Cuda specific tests")
         self.max_threads_dim0 = test_ctx.maxlsize0
         self.max_grid_size1 = test_ctx.maxgsize2
         self.op_class = CumOp
