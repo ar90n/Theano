@@ -970,9 +970,9 @@ __device__ ga_half atomicExch(ga_half *addr, ga_half val) {
              X = (%(type_x)s *)(((char *)X)+offset_X);
              Y = (%(type_y)s *)(((char *)Y)+offset_Y);
              indices_arr = (%(type_ind)s *)(((char *)indices_arr)+offset_indices_arr);
-             for (int i = (blockIdx.x); i < numIndices; i += gridDim.x)
+             for (int i = (GID_0); i < numIndices; i += GDIM_0)
              {
-                  for(int j = (threadIdx.x); j < numColsX;j += blockDim.x)
+                  for(int j = (LID_0); j < numColsX;j += LDIM_0)
                   {
                       ga_ssize x_row = indices_arr[i * stridesIndices];
                       if (x_row < 0)
