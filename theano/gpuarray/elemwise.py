@@ -540,8 +540,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
 
     def make_node(self, x):
         x = as_gpuarray_variable(x, infer_context_name(x))
-        if x.type.context.kind != b'cuda':
-            raise TypeError("GpuCAReduceCuda doesn't work for non-cuda devices")
+        #if x.type.context.kind != b'cuda':
+        #    raise TypeError("GpuCAReduceCuda doesn't work for non-cuda devices")
         ret = super(GpuCAReduceCuda, self).make_node(x)
         self = copy.copy(self)
         self.axis = ret.op.axis
@@ -949,9 +949,9 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
         acc_type = gpuarray.dtype_to_ctype(acc_dtype)
 
         return """
-                const int threadCount = blockDim.x * blockDim.y * blockDim.z;
-                const int threadNum = threadIdx.z * blockDim.x * blockDim.y
-                + threadIdx.y * blockDim.x + threadIdx.x;
+                const int threadCount = LDIM_0 * LDIM_1 * LDIM_2;
+                const int threadNum = LID_2 * LDIM_0 * LDIM_1
+                + LID_1 * LDIM_0 + LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = 0;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -1613,9 +1613,9 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             err = GpuArray_sync(&%(z)s->ga);
             %(err_check)s
             """ % locals()
-        # use threadIdx.x for i0
-        # use blockIdx.x for i1
-        # use blockIdx.y for i2
+        # use LID_0 for i0
+        # use GID_0 for i1
+        # use GID_1 for i2
         print("""
         {
             int verbose = 0;
@@ -1897,8 +1897,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     const %(in_type)s *A, const ga_size offset_A,
                     %(out_type)s *Z, const ga_size offset_Z)
             {
-                const int threadCount = blockDim.x;
-                const int threadNum = threadIdx.x;
+                const int threadCount = LDIM_0;
+                const int threadNum = LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = %(reduce_init)s;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -1909,7 +1909,7 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int i0 = threadIdx.x; i0 < d0; i0 += blockDim.x)
+                for (int i0 = LID_0; i0 < d0; i0 += LDIM_0)
                 {
                     %(reduce_fct)s
                 }
@@ -1941,8 +1941,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     const ga_ssize sA0,
                     %(out_type)s * Z, const ga_size offset_Z)
             {
-                const int threadCount = blockDim.x;
-                const int threadNum = threadIdx.x;
+                const int threadCount = LDIM_0;
+                const int threadNum = LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = %(reduce_init)s;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -1953,7 +1953,7 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int i0 = threadIdx.x; i0 < d0; i0 += blockDim.x)
+                for (int i0 = LID_0; i0 < d0; i0 += LDIM_0)
                 {
                     %(reduce_fct)s
                 }
@@ -1986,8 +1986,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     const ga_ssize sA0, const ga_ssize sA1,
                     %(out_type)s * Z, const ga_size offset_Z)
             {
-                const int threadCount = blockDim.x * blockDim.y;
-                const int threadNum = threadIdx.y*blockDim.x + threadIdx.x;
+                const int threadCount = LDIM_0 * LDIM_1;
+                const int threadNum = LID_1*LDIM_0 + LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = %(reduce_init)s;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -1998,9 +1998,9 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int i0 = threadIdx.y; i0 < d0; i0 += blockDim.y)
+                for (int i0 = LID_1; i0 < d0; i0 += LDIM_1)
                 {
-                    for (int i1 = threadIdx.x; i1 < d1; i1 += blockDim.x)
+                    for (int i1 = LID_0; i1 < d1; i1 += LDIM_0)
                     {
                         %(reduce_fct)s;
                     }
@@ -2028,8 +2028,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             # code, rather than have the for_* variables declare them
             # and the later code use their names?
             if nd_in == 2:
-                for_i1 = "for (int i1 = threadIdx.x; i1 < d1; i1 += blockDim.x)"
-                first_i1 = 'threadIdx.x'
+                for_i1 = "for (int i1 = LID_0; i1 < d1; i1 += LDIM_0)"
+                first_i1 = 'LID_0'
                 sA1 = 'sA1'
                 for_i2 = "int i2=0, sA2=0;"
                 sA2 = '0'
@@ -2038,24 +2038,24 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                 sA3 = '0'
                 first_i3 = '0'
             if nd_in == 3:
-                for_i1 = "for (int i1 = threadIdx.y; i1 < d1; i1 += blockDim.y)"
-                first_i1 = 'threadIdx.y'
+                for_i1 = "for (int i1 = LID_1; i1 < d1; i1 += LDIM_1)"
+                first_i1 = 'LID_1'
                 sA1 = 'sA1'
-                for_i2 = "for (int i2 = threadIdx.x; i2 < d2; i2 += blockDim.x)"
-                first_i2 = 'threadIdx.x'
+                for_i2 = "for (int i2 = LID_0; i2 < d2; i2 += LDIM_0)"
+                first_i2 = 'LID_0'
                 sA2 = 'sA2'
                 for_i3 = "int i3=0, sA3=0;"
                 first_i3 = 0
                 sA3 = '0'
             if nd_in == 4:
-                for_i1 = "for (int i1 = threadIdx.z; i1 < d1; i1 += blockDim.z)"
-                first_i1 = 'threadIdx.z'
+                for_i1 = "for (int i1 = LID_2; i1 < d1; i1 += LDIM_2)"
+                first_i1 = 'LID_2'
                 sA1 = 'sA1'
-                for_i2 = "for (int i2 = threadIdx.y; i2 < d2; i2 += blockDim.y)"
-                first_i2 = 'threadIdx.y'
+                for_i2 = "for (int i2 = LID_1; i2 < d2; i2 += LDIM_1)"
+                first_i2 = 'LID_1'
                 sA2 = 'sA2'
-                for_i3 = "for (int i3 = threadIdx.x; i3 < d3; i3 += blockDim.x)"
-                first_i3 = 'threadIdx.x'
+                for_i3 = "for (int i3 = LID_0; i3 < d3; i3 += LDIM_0)"
+                first_i3 = 'LID_0'
                 sA3 = 'sA3'
 
             reducebuf = self._k_reduce_buf('Z[i0 * sZ0]', node,
@@ -2075,7 +2075,7 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             print("""
                 %(decl)s{
                     %(init)s
-                    for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x){
+                    for (int i0 = GID_0; i0 < d0; i0 += GDIM_0){
                       myresult = %(reduce_init)s;
                       %(for_i1)s{
                         %(for_i2)s{
@@ -2102,7 +2102,7 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             reduce_fct = self._assign_reduce(node, nodename, "myresult",
                                              load_in + "(A + (i0 * sA0 + i1 * sA1 + i2 * sA2))",
                                              {}, True)
-            reduce_init = self._assign_init(load_in + "(A + (i0 * sA0 + threadIdx.x * sA1 + i2 * sA2))")
+            reduce_init = self._assign_init(load_in + "(A + (i0 * sA0 + LID_0 * sA1 + i2 * sA2))")
             kname = "kernel_reduce_010"
             k_var = "kernel_reduce_010_" + nodename
             sio = StringIO()
@@ -2114,8 +2114,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     %(out_type)s * Z, const ga_size offset_Z,
                     const ga_ssize sZ0, const ga_ssize sZ1)
             {
-                const int threadCount = blockDim.x;
-                const int threadNum = threadIdx.x;
+                const int threadCount = LDIM_0;
+                const int threadNum = LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
                 Z = (%(out_type)s *)(((char *)Z)+offset_Z);
@@ -2126,12 +2126,12 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                 }
 
 
-                for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x)
+                for (int i0 = GID_0; i0 < d0; i0 += GDIM_0)
                 {
-                    for (int i2 = blockIdx.y; i2 < d2; i2 += gridDim.y)
+                    for (int i2 = GID_1; i2 < d2; i2 += GDIM_1)
                     {
                         %(acc_type)s myresult = %(reduce_init)s;
-                        for (int i1 = threadIdx.x; i1 < d1; i1 += blockDim.x)
+                        for (int i1 = LID_0; i1 < d1; i1 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2166,8 +2166,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     %(out_type)s * Z, const ga_size offset_Z,
                     const ga_ssize sZ0, const ga_ssize sZ1)
             {
-                const int threadCount = blockDim.x;
-                const int threadNum = threadIdx.x;
+                const int threadCount = LDIM_0;
+                const int threadNum = LID_0;
                 %(acc_type)s myresult = 0;
                 X = (const %(in_type)s *)(((char *)X)+offset_X);
                 Z = (%(out_type)s *)(((char *)Z)+offset_Z);
@@ -2177,11 +2177,11 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int a = blockIdx.x; a < A; a += gridDim.x)
+                for (int a = GID_0; a < A; a += GDIM_0)
                 {
-                    for (int i2_D = blockIdx.y; i2_D < D; i2_D += gridDim.y)
+                    for (int i2_D = GID_1; i2_D < D; i2_D += GDIM_1)
                     {
-                        int c = i2_D * 32 + threadIdx.x;
+                        int c = i2_D * 32 + LID_0;
                         if (c < C)
                         {
                             myresult = %(reduce_init)s;
@@ -2221,7 +2221,7 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             decl, kname, params, k_var = self._k_decl(node, nodename, pattern="010_inner")
             reducebuf = self._k_reduce_buf_multiple('Z[i0 * sZ0 + i2*sZ1]',
                                                     node, nodename,
-                                                    'blockDim.x')
+                                                    'LDIM_0')
             reduce_fct = self._assign_reduce(node, nodename, "myresult",
                                              load_in + "(A + (i0 * sA0 + i1 * sA1 + i2 * sA2))",
                                              {}, True)
@@ -2230,19 +2230,19 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             print("""
             %(decl)s
             {
-             if(warpSize<blockDim.x){
+             if(warpSize<LDIM_0){
                //TODO: set error code
                Z[0] = -666;
                return;
               }
 
               %(init)s
-              for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x)
+              for (int i0 = GID_0; i0 < d0; i0 += GDIM_0)
               {
-                for (int i2 = blockIdx.y*blockDim.x+threadIdx.x; i2 < d2; i2 += gridDim.y*blockDim.x)
+                for (int i2 = GID_1*LDIM_0+LID_0; i2 < d2; i2 += GDIM_1*LDIM_0)
                  {
                   myresult = %(reduce_init)s;
-                  for (int i1 = threadIdx.y; i1 < d1; i1 += blockDim.y)
+                  for (int i1 = LID_1; i1 < d1; i1 += LDIM_1)
                   {
                       %(reduce_fct)s;
                   }
@@ -2260,11 +2260,11 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             # TODO: This kernel is pretty inefficient in terms of reading, because if A is
             #      c_contiguous (typical case) then each warp is accessing non-contigous
             #      memory (a segment of a column).
-            reducebuf = self._k_reduce_buf('Z[blockIdx.x * sZ0]', node, nodename, sub={})
+            reducebuf = self._k_reduce_buf('Z[GID_0 * sZ0]', node, nodename, sub={})
             reduce_fct = self._assign_reduce(node, nodename, "myresult",
-                                             load_in + "(A + (i0 * sA0 + i1 * sA1 + blockIdx.x * sA2))",
+                                             load_in + "(A + (i0 * sA0 + i1 * sA1 + GID_0 * sA2))",
                                              {}, True)
-            reduce_init = self._assign_init(load_in + "(A + (blockIdx.x * sA2))")
+            reduce_init = self._assign_init(load_in + "(A + (GID_0 * sA2))")
             kname = "kernel_reduce_110"
             k_var = "kernel_reduce_110_" + nodename
             sio = StringIO()
@@ -2276,8 +2276,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     %(out_type)s * Z, const ga_size offset_Z,
                     const ga_ssize sZ0)
             {
-                const int threadCount = blockDim.x * blockDim.y;
-                const int threadNum = threadIdx.y * blockDim.x + threadIdx.x;
+                const int threadCount = LDIM_0 * LDIM_1;
+                const int threadNum = LID_1 * LDIM_0 + LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = %(reduce_init)s;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -2286,13 +2286,13 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                 if (warpSize != 32)
                 {
                     //TODO: set error code
-                    %(write_out)s(Z + (blockIdx.x * sZ0), -666);
+                    %(write_out)s(Z + (GID_0 * sZ0), -666);
                     return;
                 }
 
-                for (int i0 = threadIdx.y; i0 < d0; i0 += blockDim.y)
+                for (int i0 = LID_1; i0 < d0; i0 += LDIM_1)
                 {
-                    for (int i1 = threadIdx.x; i1 < d1; i1 += blockDim.x)
+                    for (int i1 = LID_0; i1 < d1; i1 += LDIM_0)
                     {
                         %(reduce_fct)s;
                     }
@@ -2324,12 +2324,12 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             %(decl)s
             {
                 %(init)s
-                for (int i2 = blockIdx.y; i2 < d2; i2 += gridDim.y)
+                for (int i2 = GID_1; i2 < d2; i2 += GDIM_1)
                 {
-                    for (int i1 = blockIdx.x; i1 < d1; i1 += gridDim.x)
+                    for (int i1 = GID_0; i1 < d1; i1 += GDIM_0)
                     {
                         myresult = %(reduce_init)s;
-                        for (int i0 = threadIdx.x; i0 < d0; i0 += blockDim.x)
+                        for (int i0 = LID_0; i0 < d0; i0 += LDIM_0)
                         {
                             %(reduce_fct)s
                         }
@@ -2355,11 +2355,11 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             {
                 %(init)s
                 myresult = %(reduce_init)s;
-                for (int i0 = threadIdx.z; i0 < d0; i0 += blockDim.z)
+                for (int i0 = LID_2; i0 < d0; i0 += LDIM_2)
                 {
-                    for (int i1 = threadIdx.y; i1 < d1; i1 += blockDim.y)
+                    for (int i1 = LID_1; i1 < d1; i1 += LDIM_1)
                     {
-                        for (int i2 = threadIdx.x; i2 < d2; i2 += blockDim.x)
+                        for (int i2 = LID_0; i2 < d2; i2 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2390,8 +2390,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     %(out_type)s * Z, const ga_size offset_Z,
                     const ga_ssize sZ0, const ga_ssize sZ1)
             {
-                const int threadCount = blockDim.x;
-                const int threadNum = threadIdx.x;
+                const int threadCount = LDIM_0;
+                const int threadNum = LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
                 Z = (%(out_type)s *)(((char *)Z)+offset_Z);
@@ -2401,12 +2401,12 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x)
+                for (int i0 = GID_0; i0 < d0; i0 += GDIM_0)
                 {
-                    for (int i1 = blockIdx.y; i1 < d1; i1 += gridDim.y)
+                    for (int i1 = GID_1; i1 < d1; i1 += GDIM_1)
                     {
                         %(acc_type)s myresult = %(reduce_init)s;
-                        for (int i2 = threadIdx.x; i2 < d2; i2 += blockDim.x)
+                        for (int i2 = LID_0; i2 < d2; i2 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2441,14 +2441,14 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             {
                 %(init)s
 
-                for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x)
+                for (int i0 = GID_0; i0 < d0; i0 += GDIM_0)
                 {
-                    for (int i1 = blockIdx.y; i1 < d1; i1 += gridDim.y)
+                    for (int i1 = GID_1; i1 < d1; i1 += GDIM_1)
                     {
                         %(acc_type)s myresult = %(reduce_init)s;
-                    for (int i2 = threadIdx.y; i2 < d2; i2 += blockDim.y)
+                    for (int i2 = LID_1; i2 < d2; i2 += LDIM_1)
                     {
-                        for (int i3 = threadIdx.x; i3 < d3; i3 += blockDim.x)
+                        for (int i3 = LID_0; i3 < d3; i3 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2477,14 +2477,14 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             {
                 %(init)s
 
-                for (int i0 = blockIdx.x; i0 < d0; i0 += gridDim.x)
+                for (int i0 = GID_0; i0 < d0; i0 += GDIM_0)
                 {
-                    for (int i2 = blockIdx.y; i2 < d2; i2 += gridDim.y)
+                    for (int i2 = GID_1; i2 < d2; i2 += GDIM_1)
                     {
                         %(acc_type)s myresult = %(reduce_init)s;
-                    for (int i1 = threadIdx.y; i1 < d1; i1 += blockDim.y)
+                    for (int i1 = LID_1; i1 < d1; i1 += LDIM_1)
                     {
-                        for (int i3 = threadIdx.x; i3 < d3; i3 += blockDim.x)
+                        for (int i3 = LID_0; i3 < d3; i3 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2512,11 +2512,11 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                 %(init)s
                 myresult = %(reduce_init)s;
               for (int i0 = 0; i0 < d0; i0++)
-                for (int i1 = threadIdx.z; i1 < d1; i1 += blockDim.z)
+                for (int i1 = LID_2; i1 < d1; i1 += LDIM_2)
                 {
-                    for (int i2 = threadIdx.y; i2 < d2; i2 += blockDim.y)
+                    for (int i2 = LID_1; i2 < d2; i2 += LDIM_1)
                     {
-                        for (int i3 = threadIdx.x; i3 < d3; i3 += blockDim.x)
+                        for (int i3 = LID_0; i3 < d3; i3 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
@@ -2528,12 +2528,12 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
             kernels.append(Kernel(code=sio.getvalue(), name=kname,
                                   params=params, flags=flags, objvar=k_var))
         if self.reduce_mask == (1, 0, 1, 1) or self.reduce_mask == (1, 0, 1):
-            reducebuf = self._k_reduce_buf('Z[blockIdx.x*sZ0]',
+            reducebuf = self._k_reduce_buf('Z[GID_0*sZ0]',
                                            node, nodename, sub={})
             reduce_fct = self._assign_reduce(node, nodename, "myresult",
-                                             load_in + "(A + (i0 * sA0 + blockIdx.x * sA1 + i2 * sA2 + i3 * sA3))",
+                                             load_in + "(A + (i0 * sA0 + GID_0 * sA1 + i2 * sA2 + i3 * sA3))",
                                              {}, True)
-            reduce_init = self._assign_init(load_in + "(A + (blockIdx.x * sA1))")
+            reduce_init = self._assign_init(load_in + "(A + (GID_0 * sA1))")
             kname = "kernel_reduce_1011"
             k_var = "kernel_reduce_1011_" + nodename
             sio = StringIO()
@@ -2545,8 +2545,8 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     %(out_type)s * Z, const ga_size offset_Z,
                     const ga_ssize sZ0)
             {
-                const int threadCount = blockDim.x * blockDim.y * blockDim.z;
-                const int threadNum = threadIdx.z * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+                const int threadCount = LDIM_0 * LDIM_1 * LDIM_2;
+                const int threadNum = LID_2 * LDIM_0 * LDIM_1 + LID_1 * LDIM_0 + LID_0;
                 extern __shared__ %(acc_type)s buf[];
                 %(acc_type)s myresult = %(reduce_init)s;
                 A = (const %(in_type)s *)(((char *)A)+offset_A);
@@ -2557,11 +2557,11 @@ class GpuCAReduceCuda(GpuKernelBase, HideC, CAReduceDtype):
                     return;  //TODO: set error code
                 }
 
-                for (int i0 = threadIdx.z; i0 < d0; i0 += blockDim.z)
+                for (int i0 = LID_2; i0 < d0; i0 += LDIM_2)
                 {
-                    for (int i2 = threadIdx.y; i2 < d2; i2 += blockDim.y)
+                    for (int i2 = LID_1; i2 < d2; i2 += LDIM_1)
                     {
-                        for (int i3 = threadIdx.x; i3 < d3; i3 += blockDim.x)
+                        for (int i3 = LID_0; i3 < d3; i3 += LDIM_0)
                         {
                             %(reduce_fct)s;
                         }
